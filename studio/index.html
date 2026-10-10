@@ -73,6 +73,7 @@ Only valid values are offered, so the tree can't break.</div>
 <div class="tabs">
   <button id="tabBtnTree" class="active">Decision Tree</button>
   <button id="tabBtnWf">Workflows</button>
+  <button id="tabBtnSkills">Skills</button>
 </div>
 
 <div id="tab-tree">
@@ -195,6 +196,32 @@ Only valid values are offered, so the tree can't break.</div>
     </div>
     <div class="hint">Matches trigger phrases against the query — this is what System 1's workflow decision uses.</div>
     <div id="wi_result"></div>
+  </div>
+</div>
+
+<div id="tab-skills" style="display:none">
+  <div class="bar">
+    <div><label style="margin:0 0 4px">Agent</label><select id="sk_agent" style="min-width:220px"></select></div>
+    <button id="sk_refresh" class="ghost">↺ Refresh registry</button>
+    <span id="sk_status"></span>
+    <span id="sk_live" class="hint" title="The router re-discovers agent skills from their agent cards"></span>
+  </div>
+  <div id="sklist"></div>
+  <div class="panel" id="skdetail" style="display:none;margin-top:20px">
+    <h2 id="skd_title">Skill detail</h2>
+    <div id="skd_info"></div>
+    <h2 style="margin-top:16px">🧪 Test call</h2>
+    <label>Args (JSON)</label>
+    <textarea id="sk_args" rows="4" placeholder='e.g. {"order_id": "48291"}'>{}</textarea>
+    <div class="inline">
+      <div><label>Protocol</label><select id="sk_proto">
+        <option value="auto">auto (prefer MCP)</option>
+        <option value="mcp">mcp</option>
+        <option value="a2a">a2a</option>
+      </select></div>
+      <div><label>&nbsp;</label><button id="sk_run" style="width:100%">Run</button></div>
+    </div>
+    <div id="sk_result"></div>
   </div>
 </div>
 
@@ -350,15 +377,109 @@ function verdictHTML(dec, out) {
     ${dec.message?`<div style="margin-top:6px">${esc(dec.message)}</div>`:""}</div>${snap}`;
 }
 
+// ------------------------------------------------------------- skills
+// Central skill registry lives on the ROUTER (different origin), so the
+// Skills tab calls its absolute URL. CORS is enabled there for GET/POST.
+const ROUTER_BASE = "https://intent-router-1031371624665.us-central1.run.app";
+let SKILLS = [], SKILLS_LOADED = false, SK_META = {};
+
+function setSkStatus(msg, cls="") { const s=$("sk_status"); s.textContent=msg; s.className=cls; }
+
+async function rApi(method, path, body) {
+  const r = await fetch(ROUTER_BASE + path, {method,
+    headers: {"content-type": "application/json"},
+    body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || "request failed");
+  return j;
+}
+
+function skillName(s) { return s.skill || s.name; }
+
+function renderSkills() {
+  const agentFilter = $("sk_agent").value;
+  const el = $("sklist"); el.innerHTML = "";
+  const list = SKILLS.filter(s => !agentFilter || s.agent === agentFilter);
+  if (!list.length) { el.innerHTML = `<div class="hint">No skills match.</div>`; return; }
+  list.forEach(s => {
+    const name = skillName(s);
+    const protos = (s.protocols || []).map(p =>
+      `<span class="chip ${p === "mcp" ? "then" : "when"}">${esc(p.toUpperCase())}</span>`).join("");
+    const stale = (SK_META.stale_agents || []).includes(s.agent_url) ||
+                  (SK_META.stale_agents || []).includes(s.agent);
+    const d = document.createElement("div"); d.className = "rule";
+    d.innerHTML = `<h3>${esc(name)}${stale ? ` <span class="chip" style="border-color:var(--warn);color:var(--warn)">stale</span>` : ""}</h3>
+      <div class="desc">${esc(s.description || "")}</div>
+      <div class="chips">${chip(`agent <b>${esc(s.agent)}</b>`, "when")}${protos}</div>
+      <div class="row-actions"><button class="ghost small" data-sk="${esc(name)}">Detail &amp; test call</button></div>`;
+    d.querySelector("button").onclick = () => openSkillDetail(name);
+    el.appendChild(d);
+  });
+}
+
+async function loadSkills() {
+  setSkStatus("Loading registry…", "");
+  try {
+    const data = await rApi("GET", "/skills");
+    // Defensive: accept {"skills":[...]} (live shape) or {"agents":[...]}.
+    let skills = data.skills || [];
+    if (!skills.length && Array.isArray(data.agents)) {
+      data.agents.forEach(a => (a.skills || []).forEach(sk => {
+        skills.push(typeof sk === "string"
+          ? {skill: sk, agent: a.agent || a.name, description: "", protocols: []}
+          : {skill: sk.name, agent: a.agent || a.name,
+              description: sk.description || "", protocols: sk.protocols || []});
+      }));
+    }
+    SKILLS = skills; SK_META = data; SKILLS_LOADED = true;
+    const agents = [...new Set(skills.map(s => s.agent))].sort();
+    $("sk_agent").innerHTML = `<option value="">All agents</option>` +
+      agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+    renderSkills();
+    const staleN = (data.stale_agents || []).length;
+    setSkStatus(`✓ ${data.skill_count ?? skills.length} skills · ` +
+      `${data.agent_count ?? agents.length} agent(s)` +
+      (staleN ? ` · ${staleN} stale` : ""), "ok");
+    const live = $("sk_live");
+    live.textContent = data.last_refresh
+      ? `● registry updated ${String(data.last_refresh).slice(11, 19)} UTC · auto-discovers from agent cards`
+      : `● registry live`;
+    live.style.color = staleN ? "var(--warn)" : "var(--ok)";
+  } catch(e) { setSkStatus("✕ " + e.message, "bad"); }
+}
+
+async function openSkillDetail(name) {
+  $("skdetail").style.display = "block";
+  $("skd_title").textContent = name;
+  $("skd_info").innerHTML = `<span class="hint">Loading…</span>`;
+  $("sk_result").innerHTML = "";
+  try {
+    const s = await rApi("GET", "/skills/" + encodeURIComponent(name));
+    const protos = (s.protocols || []).map(p =>
+      `<span class="chip ${p === "mcp" ? "then" : "when"}">${esc(p.toUpperCase())}</span>`).join("");
+    $("skd_info").innerHTML =
+      `<div class="desc">${esc(s.description || "")}</div>` +
+      `<div class="chips">${chip(`agent <b>${esc(s.agent)}</b>`, "when")}${protos}</div>` +
+      (s.agent_url ? `<div class="hint">${esc(s.agent_url)}</div>` : "") +
+      `<pre>${esc(JSON.stringify(s, null, 1))}</pre>`;
+  } catch(e) {
+    $("skd_info").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`;
+  }
+  $("skdetail").scrollIntoView({behavior: "smooth", block: "nearest"});
+}
+
 // ------------------------------------------------------------- workflows
 function setWStatus(msg, cls="") { const s=$("wstatus"); s.textContent=msg; s.className=cls; }
 
 function showTab(which) {
   $("tab-tree").style.display = which === "tree" ? "block" : "none";
   $("tab-workflows").style.display = which === "workflows" ? "block" : "none";
+  $("tab-skills").style.display = which === "skills" ? "block" : "none";
   $("tabBtnTree").classList.toggle("active", which === "tree");
   $("tabBtnWf").classList.toggle("active", which === "workflows");
+  $("tabBtnSkills").classList.toggle("active", which === "skills");
   if (which === "workflows" && !WFLOWS_LOADED) { fillWfAgents(); loadWorkflows(); }
+  if (which === "skills" && !SKILLS_LOADED) { loadSkills(); }
 }
 
 function fillWfAgents() {
@@ -545,6 +666,7 @@ async function init() {
   // --- workflows tab ---
   $("tabBtnTree").onclick = () => showTab("tree");
   $("tabBtnWf").onclick = () => showTab("workflows");
+  $("tabBtnSkills").onclick = () => showTab("skills");
   $("addWf").onclick = () => openWEditor(-1);
   $("w_save").onclick = saveWEditor;
   $("w_cancel").onclick = closeWEditor;
@@ -571,6 +693,28 @@ async function init() {
     } catch(e) { $("wi_result").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
   };
   setInterval(refreshWfLive, 10000);
+
+  // --- skills tab (router registry, cross-origin) ---
+  $("sk_agent").onchange = () => renderSkills();
+  $("sk_refresh").onclick = async () => {
+    setSkStatus("Refreshing…", "");
+    try { await rApi("POST", "/skills/refresh", {}); }
+    catch(e) { setSkStatus("✕ " + e.message, "bad"); return; }
+    SKILLS_LOADED = false; await loadSkills();
+  };
+  $("sk_run").onclick = async () => {
+    const name = $("skd_title").textContent;
+    let args; try { args = JSON.parse($("sk_args").value || "{}"); }
+    catch(e) { return alert("Args is not valid JSON: " + e.message); }
+    $("sk_result").innerHTML = "<span class='hint'>Running…</span>";
+    try {
+      const r = await rApi("POST", "/skills/" + encodeURIComponent(name) + "/call",
+        {args, protocol: $("sk_proto").value});
+      $("sk_result").innerHTML = `<pre>${esc(JSON.stringify(r, null, 1))}</pre>`;
+    } catch(e) {
+      $("sk_result").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`;
+    }
+  };
 }
 init().catch(e => setStatus("Failed to load: " + e.message, "bad"));
 </script>
