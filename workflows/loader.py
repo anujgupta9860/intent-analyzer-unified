@@ -123,7 +123,14 @@ class WorkflowLoader:
             if agent and w.get("agent") != agent and not w.get("any_agent"):
                 continue
             for trigger in w.get("triggers", []):
-                if trigger.lower() in t:
+                trig = trigger.lower()
+                if len(trig) <= 3:
+                    # short triggers ("hi") need word boundaries —
+                    # otherwise "hi" matches inside "ship"
+                    import re as _re
+                    if _re.search(r"\b" + _re.escape(trig) + r"\b", t):
+                        return w
+                elif trig in t:
                     return w
         return None
 
