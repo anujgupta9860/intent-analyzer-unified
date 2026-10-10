@@ -336,8 +336,13 @@ def workflows_put(req: WorkflowsPut):
     return {"saved": True, "workflows": len(loader.workflows())}
 
 
+class WorkflowIdentifyRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    worker_agent: str = Field(description="agent name")
+
+
 @app.post("/workflows/identify")
-def workflows_identify(req: DecideRequest):
+def workflows_identify(req: WorkflowIdentifyRequest):
     """System 1's workflow decision: which workflow does this query start?
 
     Returns the matched workflow (or null for a single task).
