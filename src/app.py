@@ -47,6 +47,7 @@ _state: dict = {}
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLICY_PATH = REPO_ROOT / "policy" / "decision-tree.yaml"
+DEFAULT_WORKFLOWS_PATH = REPO_ROOT / "workflows" / "workflows.yaml"
 STUDIO_INDEX = REPO_ROOT / "studio" / "index.html"
 
 # Known actions offered in the Studio UI (free text also allowed).
@@ -72,6 +73,18 @@ def _policy_engine():
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         _state["policy"] = eng
     return eng
+
+
+def _workflows_loader():
+    from workflows.loader import WorkflowLoader, WorkflowError
+    loader = _state.get("workflows")
+    if loader is None:
+        try:
+            loader = WorkflowLoader(DEFAULT_WORKFLOWS_PATH)
+        except WorkflowError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _state["workflows"] = loader
+    return loader
 
 
 @asynccontextmanager
@@ -274,6 +287,67 @@ def policy_tree_put(req: PolicyTreePut):
     return {"saved": True, "rules": len(eng.rules)}
 
 
+# ------------------------------------------------------- workflow definitions
+# Hot-reloaded workflow library. The Studio edits these; the router
+# fetches them from GET /workflows and runs the state machine.
+
+
+@app.get("/workflows")
+def workflows_list():
+    """All workflow definitions (hot-reloaded)."""
+    import yaml
+    loader = _workflows_loader()
+    loader.maybe_reload()
+    return {"workflows": yaml.safe_load(
+        DEFAULT_WORKFLOWS_PATH.read_text())["workflows"]}
+
+
+@app.get("/workflows/status")
+def workflows_status():
+    """Hot-reload status for workflows.yaml."""
+    return _workflows_loader().status()
+
+
+class WorkflowsPut(BaseModel):
+    workflows: list = Field(description="full workflow list replacing the file")
+
+
+@app.put("/workflows")
+def workflows_put(req: WorkflowsPut):
+    """Validate then save new workflow definitions (from the Studio UI)."""
+    import yaml
+    from workflows.loader import WorkflowError
+    loader = _workflows_loader()
+    # validate by loading into a temp loader before touching the file
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml",
+                                     delete=False) as tmp:
+        yaml.safe_dump({"workflows": req.workflows}, tmp,
+                       sort_keys=False, allow_unicode=True)
+        tmp_path = tmp.name
+    try:
+        from workflows.loader import WorkflowLoader
+        WorkflowLoader(tmp_path)  # raises on invalid
+    except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    DEFAULT_WORKFLOWS_PATH.write_text(yaml.safe_dump(
+        {"workflows": req.workflows}, sort_keys=False, allow_unicode=True))
+    loader.reload()
+    return {"saved": True, "workflows": len(loader.workflows())}
+
+
+@app.post("/workflows/identify")
+def workflows_identify(req: DecideRequest):
+    """System 1's workflow decision: which workflow does this query start?
+
+    Returns the matched workflow (or null for a single task).
+    """
+    loader = _workflows_loader()
+    wf = loader.match(req.query, req.worker_agent.strip().lower())
+    return {"workflow": wf["name"] if wf else None,
+            "definition": wf}
+
+
 class PolicyTestRequest(BaseModel):
     query: str | None = Field(
         default=None, description="run the analyzer on this query "
@@ -320,6 +394,10 @@ class DecideRequest(BaseModel):
     worker_agent: str = Field(
         description="agent name: one of billing|orders|support|account|sales")
     router_context: dict = Field(default_factory=dict)
+    workflow: str | None = Field(
+        default=None,
+        description="active workflow name — the policy tree and analyzer "
+                    "run at workflow level with this set")
 
 
 @app.post("/decide")
@@ -348,9 +426,15 @@ def decide(req: DecideRequest):
     eng = _policy_engine()
     eng.maybe_reload()  # pick up on-disk edits without redeploy
     decision = eng.decide(analyzer_out)
-    return {
+    out: dict = {
         "agent": agent,
         "query": req.query.strip(),
         "analyzer": analyzer_out,
         "decision": decision.to_dict(),
     }
+    if req.workflow:
+        # Workflow level: attach the workflow definition so the router's
+        # decision mechanism runs with workflow context.
+        wf = _workflows_loader().get(req.workflow)
+        out["workflow"] = wf
+    return out

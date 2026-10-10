@@ -1,0 +1,81 @@
+# Workflow definitions — HOT-RELOADED.
+#
+# A workflow is a multi-step user goal. System 1 identifies the workflow
+# ONCE; afterwards steps advance deterministically (on_success /
+# on_failure) with locked intents — System 1 stays out until the
+# workflow completes, aborts, or the user switches goals.
+#
+# Edit this file (or PUT /workflows) and the changes go live on the
+# next request. Broken edits keep the last good set serving
+# (see GET /workflows/status).
+#
+# Each workflow:
+#   name:        unique id (System 1's `workflow` decision value)
+#   description: what user goal it serves
+#   agent:       worker agent that runs its steps
+#   triggers:    phrases that identify this workflow (System 1's
+#                workflow decision uses these until the Laya
+#                workflow head is trained)
+#   steps:       ordered list; each step:
+#     id:          step id (referenced by on_success/on_failure)
+#     action:      worker action for this step
+#     needs_slots: slots that must be filled before the step runs
+#     on_success:  next step id | "complete"
+#     on_failure:  next step id | "abort" | "retry"
+
+workflows:
+  - name: greeting
+    description: Greet the user and explain what the assistant can do.
+    agent: orders
+    any_agent: true
+    triggers:
+      - "hi"
+      - "hello"
+      - "hey"
+      - "good morning"
+      - "good afternoon"
+      - "good evening"
+    steps:
+      - id: greet
+        action: greet
+        needs_slots: []
+        on_success: complete
+        on_failure: complete
+
+  - name: return_and_replace
+    description: Return an order and buy a replacement item in one flow.
+    agent: orders
+    triggers:
+      - "return and replace"
+      - "return it and buy"
+      - "send it back and order"
+      - "return and order"
+    steps:
+      - id: return
+        action: return
+        needs_slots: [order_id]
+        on_success: place
+        on_failure: abort
+      - id: place
+        action: place
+        needs_slots: [items, address]
+        on_success: complete
+        on_failure: abort
+
+  - name: cancel_and_reorder
+    description: Cancel a processing order and re-buy its items.
+    agent: orders
+    triggers:
+      - "cancel and reorder"
+      - "cancel it and order again"
+    steps:
+      - id: cancel
+        action: cancel
+        needs_slots: [order_id]
+        on_success: reorder
+        on_failure: abort
+      - id: reorder
+        action: reorder
+        needs_slots: [order_id]
+        on_success: complete
+        on_failure: abort

@@ -51,6 +51,18 @@
   .verdict.high { border-color:var(--bad); background:#2a1414; }
   .verdict.medium { border-color:var(--warn); background:#2a2111; }
   .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+  .tabs { display:flex; gap:8px; margin-bottom:18px; }
+  .tabs button { background:transparent; color:var(--mut); border:1px solid var(--line); }
+  .tabs button.active { background:var(--acc); color:#06121f; border-color:var(--acc); }
+  #wstatus { font-size:13px; color:var(--mut); }
+  #wstatus.ok { color:var(--ok); } #wstatus.bad { color:var(--bad); }
+  .wf-steps { margin:10px 0 4px; }
+  .wf-step { display:flex; align-items:center; gap:8px; font-size:13px; margin-bottom:6px; flex-wrap:wrap; }
+  .wf-step .sid { font-weight:700; color:var(--acc); }
+  .wf-step .flow { color:var(--mut); }
+  .wf-step .ok-t { color:var(--ok); font-weight:600; } .wf-step .fail-t { color:var(--bad); font-weight:600; }
+  .step-row { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  #weditor { display:none; margin-bottom:16px; border:2px solid var(--acc); }
 </style>
 </head>
 <body>
@@ -58,6 +70,12 @@
 <div class="sub">Rules are checked <b>top to bottom</b> — the first rule whose conditions all match wins.
 Only valid values are offered, so the tree can't break.</div>
 
+<div class="tabs">
+  <button id="tabBtnTree" class="active">Decision Tree</button>
+  <button id="tabBtnWf">Workflows</button>
+</div>
+
+<div id="tab-tree">
 <div class="bar">
   <button id="addRule">+ Add rule</button>
   <button id="saveTree">💾 Save tree</button>
@@ -124,9 +142,67 @@ Only valid values are offered, so the tree can't break.</div>
     <div id="t_result2"></div>
   </div>
 </div>
+</div><!-- /tab-tree -->
+
+<div id="tab-workflows" style="display:none">
+  <datalist id="wf-terminals"><option>complete</option><option>abort</option><option>retry</option></datalist>
+  <datalist id="wf-actions">
+    <option>track</option><option>cancel</option><option>modify</option><option>return</option>
+    <option>reorder</option><option>list</option><option>estimate</option><option>place</option>
+    <option>order_info</option><option>process_refund</option><option>open_dispute_case</option>
+    <option>lookup_order_status</option><option>ask_clarify</option><option>escalate_human</option>
+    <option>noop</option>
+  </datalist>
+
+  <div class="bar">
+    <button id="addWf">+ Add workflow</button>
+    <button id="saveWfs">💾 Save workflows</button>
+    <button id="reloadWfs" class="ghost">↺ Reload</button>
+    <span id="wstatus"></span>
+    <span id="wlive" class="hint" title="The router hot-reloads workflows from the analyzer — no redeploy needed"></span>
+  </div>
+
+  <div class="panel" id="weditor">
+    <h2 id="weditorTitle">New workflow</h2>
+    <label>Workflow name (unique id, lowercase_underscores)</label>
+    <input id="w_name" placeholder="e.g. return_and_replace">
+    <label>Plain-English description</label>
+    <textarea id="w_desc" placeholder="What user goal does this workflow serve?"></textarea>
+    <div class="inline">
+      <div><label>Agent</label><select id="w_agent"></select></div>
+    </div>
+    <label>Trigger phrases (one per line — used to identify this workflow)</label>
+    <textarea id="w_triggers" placeholder="return and replace&#10;return it and buy"></textarea>
+    <label>Steps (run in order; transitions are deterministic)</label>
+    <div id="w_steps"></div>
+    <button class="ghost small" id="w_add_step" type="button">+ Add step</button>
+
+    <div class="bar" style="margin-top:14px">
+      <button id="w_save">Done</button>
+      <button id="w_cancel" class="ghost">Cancel</button>
+    </div>
+  </div>
+
+  <div id="wflist"></div>
+
+  <div class="panel" style="margin-top:20px">
+    <h2>🧪 Test workflow identify</h2>
+    <label>Customer query</label>
+    <textarea id="wi_query" placeholder="e.g. I want to return order 12058 and buy a webcam instead"></textarea>
+    <div class="inline">
+      <div><label>Agent</label><select id="wi_agent"></select></div>
+      <div><label>&nbsp;</label><button id="wi_run" style="width:100%">Identify</button></div>
+    </div>
+    <div class="hint">Matches trigger phrases against the query — this is what System 1's workflow decision uses.</div>
+    <div id="wi_result"></div>
+  </div>
+</div>
 
 <script>
 let SPEC = null, TREE = [], editing = -1;
+let WFLOWS = [], wediting = -1, WFLOWS_LOADED = false;
+const WF_AGENTS = ["billing","orders","support","account","sales"];
+const WF_TERMINALS = ["complete","abort","retry"];
 
 const $ = id => document.getElementById(id);
 function setStatus(msg, cls="") { const s=$("status"); s.textContent=msg; s.className=cls; }
@@ -274,6 +350,153 @@ function verdictHTML(dec, out) {
     ${dec.message?`<div style="margin-top:6px">${esc(dec.message)}</div>`:""}</div>${snap}`;
 }
 
+// ------------------------------------------------------------- workflows
+function setWStatus(msg, cls="") { const s=$("wstatus"); s.textContent=msg; s.className=cls; }
+
+function showTab(which) {
+  $("tab-tree").style.display = which === "tree" ? "block" : "none";
+  $("tab-workflows").style.display = which === "workflows" ? "block" : "none";
+  $("tabBtnTree").classList.toggle("active", which === "tree");
+  $("tabBtnWf").classList.toggle("active", which === "workflows");
+  if (which === "workflows" && !WFLOWS_LOADED) { fillWfAgents(); loadWorkflows(); }
+}
+
+function fillWfAgents() {
+  const agents = (SPEC && SPEC.agents && SPEC.agents.length) ? SPEC.agents : WF_AGENTS;
+  const cur = $("w_agent").value;
+  $("w_agent").innerHTML = agents.map(a=>`<option>${a}</option>`).join("");
+  $("wi_agent").innerHTML = agents.map(a=>`<option${a==="orders"?" selected":""}>${a}</option>`).join("");
+  if (cur && agents.includes(cur)) $("w_agent").value = cur;
+}
+
+function renderWorkflows() {
+  const el = $("wflist"); el.innerHTML = "";
+  WFLOWS.forEach((w, i) => {
+    const trig = (w.triggers||[]).map(t=>chip(esc(t),"when")).join("");
+    const steps = (w.steps||[]).map(s => {
+      const slots = (s.needs_slots||[]).length
+        ? ` <span class="flow">needs [${s.needs_slots.map(esc).join(", ")}]</span>` : "";
+      return `<div class="wf-step"><span class="sid">${esc(s.id)}</span>`
+        + `<span class="chip">${esc(s.action)}</span>${slots}`
+        + `<span class="flow">→ ✓ <span class="ok-t">${esc(s.on_success)}</span>`
+        + ` / ✕ <span class="fail-t">${esc(s.on_failure)}</span></span></div>`;
+    }).join("");
+    const d = document.createElement("div"); d.className = "rule";
+    d.innerHTML = `<h3>${esc(w.name)}</h3>`
+      + `<div class="desc">${esc(w.description||"")}</div>`
+      + `<div class="chips">${chip(`agent <b>${esc(w.agent)}</b>`,"when")}${trig}</div>`
+      + `<div class="wf-steps">${steps || `<div class="hint">No steps defined.</div>`}</div>`
+      + `<div class="row-actions">
+           <button class="ghost small" data-a="edit">Edit</button>
+           <button class="danger small" data-a="del">Delete</button>
+         </div>`;
+    d.querySelectorAll("button").forEach(b => b.onclick = () => {
+      if (b.dataset.a === "del" && confirm(`Delete workflow "${w.name}"?`)) {
+        WFLOWS.splice(i, 1); renderWorkflows(); setWStatus("Unsaved changes", "");
+      }
+      if (b.dataset.a === "edit") openWEditor(i);
+    });
+    el.appendChild(d);
+  });
+  if (!WFLOWS.length)
+    el.innerHTML = `<div class="hint">No workflows yet — add one to define a multi-step user goal.</div>`;
+}
+
+function addStepRow(s={}) {
+  const row = document.createElement("div"); row.className = "step-row";
+  row.innerHTML = `
+    <div class="inline">
+      <div><label>Step id</label><input class="s_id" value="${esc(s.id||"")}" placeholder="e.g. return"></div>
+      <div><label>Action</label><input class="s_action" list="wf-actions" value="${esc(s.action||"")}" placeholder="e.g. return"></div>
+    </div>
+    <label>Needs slots (comma-separated)</label>
+    <input class="s_slots" value="${esc((s.needs_slots||[]).join(", "))}" placeholder="e.g. order_id">
+    <div class="inline">
+      <div><label>On success →</label><input class="s_ok" list="wf-terminals" value="${esc(s.on_success||"")}" placeholder="next step id or complete"></div>
+      <div><label>On failure →</label><input class="s_fail" list="wf-terminals" value="${esc(s.on_failure||"")}" placeholder="abort / retry / step id"></div>
+    </div>
+    <div class="row-actions"><button class="danger small" type="button">✕ Remove step</button></div>`;
+  row.querySelector("button").onclick = () => row.remove();
+  $("w_steps").appendChild(row);
+}
+
+function openWEditor(i) {
+  wediting = i;
+  const w = i >= 0 ? WFLOWS[i] : {name:"", description:"", agent:"orders", triggers:[], steps:[]};
+  $("weditorTitle").textContent = i >= 0 ? "Edit workflow" : "New workflow";
+  $("w_name").value = w.name || "";
+  $("w_desc").value = w.description || "";
+  fillWfAgents();
+  $("w_agent").value = w.agent || "orders";
+  $("w_triggers").value = (w.triggers||[]).join("\n");
+  $("w_steps").innerHTML = "";
+  (w.steps||[]).forEach(addStepRow);
+  if (!(w.steps||[]).length) addStepRow();
+  $("weditor").style.display = "block";
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+function closeWEditor() { $("weditor").style.display = "none"; wediting = -1; }
+
+function saveWEditor() {
+  const name = $("w_name").value.trim();
+  if (!name) return alert("Give the workflow a name.");
+  if (!/^[a-z0-9_]+$/.test(name))
+    return alert("Name must be lowercase letters, digits and underscores.");
+  if (WFLOWS.some((w,i) => w.name === name && i !== wediting))
+    return alert("A workflow with that name already exists.");
+  const agent = $("w_agent").value;
+  if (!agent) return alert("Pick an agent.");
+  const triggers = $("w_triggers").value.split("\n").map(t=>t.trim()).filter(Boolean);
+  const steps = [], ids = new Set();
+  let bad = null;
+  document.querySelectorAll("#w_steps .step-row").forEach(row => {
+    if (bad) return;
+    const id = row.querySelector(".s_id").value.trim();
+    const action = row.querySelector(".s_action").value.trim();
+    const ok = row.querySelector(".s_ok").value.trim();
+    const fail = row.querySelector(".s_fail").value.trim();
+    const slots = row.querySelector(".s_slots").value.split(",").map(s=>s.trim()).filter(Boolean);
+    if (!id || !action || !ok || !fail) { bad = "Every step needs an id, action, on_success and on_failure."; return; }
+    if (ids.has(id)) { bad = `Duplicate step id "${id}".`; return; }
+    ids.add(id);
+    steps.push({id, action, needs_slots: slots, on_success: ok, on_failure: fail});
+  });
+  if (bad) return alert(bad);
+  if (!steps.length) return alert("Add at least one step.");
+  for (const s of steps)
+    for (const t of [s.on_success, s.on_failure])
+      if (!WF_TERMINALS.includes(t) && !ids.has(t))
+        return alert(`Step "${s.id}" points at unknown target "${t}" — use a step id or complete/abort/retry.`);
+  const wf = {name, description: $("w_desc").value.trim(), agent, triggers, steps};
+  if (wediting >= 0) WFLOWS[wediting] = wf; else WFLOWS.push(wf);
+  closeWEditor(); renderWorkflows(); setWStatus("Unsaved changes", "");
+}
+
+async function loadWorkflows() {
+  try {
+    const r = await api("GET", "/workflows");
+    WFLOWS = r.workflows || [];
+    renderWorkflows(); setWStatus("Workflows loaded", "ok");
+    WFLOWS_LOADED = true;
+  } catch(e) { setWStatus("Failed to load: " + e.message, "bad"); }
+  refreshWfLive();
+}
+
+async function refreshWfLive() {
+  try {
+    const s = await api("GET", "/workflows/status");
+    const el = $("wlive");
+    if (s.live) {
+      el.textContent = `● live: ${s.workflows.length} workflows${s.last_reload ? " · updated " + s.last_reload.slice(11,19) + " UTC" : ""} · auto-reloads on edit`;
+      el.style.color = "var(--ok)";
+    } else {
+      el.textContent = `● serving last good set — rejected edit: ${s.last_error}`;
+      el.style.color = "var(--bad)";
+    }
+  } catch(e) { /* status unavailable; ignore */ }
+}
+
 async function init() {
   SPEC = await api("GET", "/policy/spec");
   ["f_conf_op"].forEach(id => $(id).innerHTML =
@@ -318,6 +541,36 @@ async function init() {
       $("t_result2").innerHTML = verdictHTML(r.decision, r.analyzer_output);
     } catch(e) { $("t_result2").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
   };
+
+  // --- workflows tab ---
+  $("tabBtnTree").onclick = () => showTab("tree");
+  $("tabBtnWf").onclick = () => showTab("workflows");
+  $("addWf").onclick = () => openWEditor(-1);
+  $("w_save").onclick = saveWEditor;
+  $("w_cancel").onclick = closeWEditor;
+  $("w_add_step").onclick = () => addStepRow();
+  $("reloadWfs").onclick = async () => { WFLOWS_LOADED = false; await loadWorkflows(); };
+  $("saveWfs").onclick = async () => {
+    try { await api("PUT", "/workflows", {workflows: WFLOWS});
+      setWStatus("✓ Saved and live", "ok"); refreshWfLive();
+    } catch(e) { setWStatus("✕ " + e.message, "bad"); alert("Could not save:\n\n" + e.message); }
+  };
+  $("wi_run").onclick = async () => {
+    const q = $("wi_query").value.trim();
+    if (!q) return alert("Type a query first.");
+    $("wi_result").innerHTML = "<span class='hint'>Identifying…</span>";
+    try {
+      const r = await api("POST", "/workflows/identify",
+                          {query: q, worker_agent: $("wi_agent").value});
+      $("wi_result").innerHTML = r.workflow
+        ? `<div class="verdict"><b>→ ${esc(r.workflow)}</b>`
+          + `<div class="hint">${esc(r.definition.description||"")} · agent: ${esc(r.definition.agent)} · `
+          + `${(r.definition.steps||[]).length} steps</div></div>`
+          + `<pre>${esc(JSON.stringify(r.definition, null, 1))}</pre>`
+        : `<div class="hint">No workflow matched — this would run as a single task.</div>`;
+    } catch(e) { $("wi_result").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
+  };
+  setInterval(refreshWfLive, 10000);
 }
 init().catch(e => setStatus("Failed to load: " + e.message, "bad"));
 </script>
