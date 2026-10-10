@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decision Tree Studio</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2a3650; --txt:#e8edf5;
+          --mut:#8b98b0; --acc:#5aa9ff; --ok:#3ecf8e; --warn:#ffb020; --bad:#ff5d5d; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--txt); font-family:system-ui,sans-serif;
+         margin:0; padding:20px; max-width:1100px; margin-inline:auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--mut); font-size:13px; margin-bottom:18px; }
+  .bar { display:flex; gap:10px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+  button { background:var(--acc); color:#06121f; border:0; border-radius:8px;
+           padding:9px 16px; font-weight:600; cursor:pointer; font-size:14px; }
+  button.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  button.danger { background:transparent; color:var(--bad); border:1px solid var(--bad); }
+  button.small { padding:5px 10px; font-size:12px; }
+  button:disabled { opacity:.4; cursor:default; }
+  #status { font-size:13px; color:var(--mut); }
+  #status.ok { color:var(--ok); } #status.bad { color:var(--bad); }
+  .rule { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px 16px; margin-bottom:12px; }
+  .rule h3 { margin:0 0 4px; font-size:16px; }
+  .rule .desc { color:var(--mut); font-size:13px; margin-bottom:10px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  .chip { background:#243049; border:1px solid var(--line); border-radius:20px;
+          padding:4px 12px; font-size:12px; }
+  .chip.when { border-color:#3f5a8a; } .chip.then { border-color:#2f7a52; }
+  .chip b { color:var(--acc); font-weight:600; }
+  .chip.then b { color:var(--ok); }
+  .row-actions { display:flex; gap:6px; margin-top:6px; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:800px){ .cols{grid-template-columns:1fr;} }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:16px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  input, select, textarea { width:100%; background:#0d1320; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:14px; }
+  textarea { min-height:70px; resize:vertical; }
+  .inline { display:flex; gap:8px; } .inline > * { flex:1; }
+  .noul-row { display:flex; gap:8px; margin-bottom:8px; align-items:center; }
+  .noul-row button { flex:0 0 auto; }
+  #editor { display:none; margin-bottom:16px; border:2px solid var(--acc); }
+  pre { background:#0d1320; border:1px solid var(--line); border-radius:8px;
+        padding:12px; font-size:12px; overflow:auto; max-height:300px; }
+  .verdict { border-left:4px solid var(--ok); padding:10px 14px; background:#12241b;
+             border-radius:0 8px 8px 0; margin-top:10px; }
+  .verdict.high { border-color:var(--bad); background:#2a1414; }
+  .verdict.medium { border-color:var(--warn); background:#2a2111; }
+  .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+</style>
+</head>
+<body>
+<h1>🌳 Decision Tree Studio</h1>
+<div class="sub">Rules are checked <b>top to bottom</b> — the first rule whose conditions all match wins.
+Only valid values are offered, so the tree can't break.</div>
+
+<div class="bar">
+  <button id="addRule">+ Add rule</button>
+  <button id="saveTree">💾 Save tree</button>
+  <button id="reloadTree" class="ghost">↺ Reload</button>
+  <span id="status"></span>
+</div>
+
+<div class="panel" id="editor">
+  <h2 id="editorTitle">New rule</h2>
+  <label>Rule name</label>
+  <input id="f_name" placeholder="e.g. Auto-refund clear cases">
+  <label>Plain-English description (for the next human)</label>
+  <textarea id="f_desc" placeholder="When should this rule fire, in words?"></textarea>
+
+  <div class="inline">
+    <div><label>Agent</label><select id="f_agent"></select></div>
+    <div><label>Choice</label><select id="f_choice"></select></div>
+  </div>
+  <label><input type="checkbox" id="f_conf_on" style="width:auto"> Confidence condition</label>
+  <div class="inline" id="f_conf_row" style="display:none">
+    <select id="f_conf_op"></select>
+    <input id="f_conf_val" type="number" min="0" max="1" step="0.05" value="0.9">
+  </div>
+
+  <label>Yes/no flag conditions</label>
+  <div id="f_nouls"></div>
+  <button class="ghost small" id="f_add_noul" type="button">+ Add flag condition</button>
+
+  <div class="inline">
+    <div><label>Action</label><input id="f_action" list="actions" placeholder="e.g. process_refund"><datalist id="actions"></datalist></div>
+    <div><label>Worker</label><select id="f_worker"></select></div>
+    <div><label>Risk</label><select id="f_risk"></select></div>
+  </div>
+  <label>Message (shown to user / logged)</label>
+  <input id="f_message" placeholder="e.g. Refund approved automatically.">
+
+  <div class="bar" style="margin-top:14px">
+    <button id="f_save">Done</button>
+    <button id="f_cancel" class="ghost">Cancel</button>
+  </div>
+</div>
+
+<div id="rules"></div>
+
+<div class="cols" style="margin-top:20px">
+  <div class="panel">
+    <h2>🧪 Test a decision</h2>
+    <label>Customer query</label>
+    <textarea id="t_query" placeholder="e.g. I want a refund for the $25 overcharge"></textarea>
+    <div class="inline">
+      <div><label>Agent</label><select id="t_agent"></select></div>
+      <div><label>&nbsp;</label><button id="t_run" style="width:100%">Test</button></div>
+    </div>
+    <div class="hint">Runs the analyzer (needs a trained checkpoint) then the tree.
+    Or test rules alone below with a hand-made analyzer output.</div>
+    <div id="t_result"></div>
+  </div>
+  <div class="panel">
+    <h2>🧪 Test rules without the model</h2>
+    <label>Analyzer output (JSON)</label>
+    <textarea id="t_json" style="min-height:120px">{"agent": "billing", "billing_action": "refund_request", "choice_confidence": 0.95, "is_dispute": 0.1, "amount_mentioned": 0.9}</textarea>
+    <button id="t_run2" style="margin-top:8px">Test rules</button>
+    <div id="t_result2"></div>
+  </div>
+</div>
+
+<script>
+let SPEC = null, TREE = [], editing = -1;
+
+const $ = id => document.getElementById(id);
+function setStatus(msg, cls="") { const s=$("status"); s.textContent=msg; s.className=cls; }
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers:{"content-type":"application/json"},
+    body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || "request failed");
+  return j;
+}
+
+function chip(text, cls) { return `<span class="chip ${cls}">${text}</span>`; }
+function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+
+function renderRules() {
+  const el = $("rules"); el.innerHTML = "";
+  TREE.forEach((r, i) => {
+    const w = r.when || {}, t = r.then || {};
+    let wh = [];
+    if (w.agent) wh.push(chip(`agent <b>${esc(w.agent)}</b>`, "when"));
+    if (w.choice) wh.push(chip(`choice <b>${esc(w.choice)}</b>`, "when"));
+    if (w.confidence) { const [op,v] = Object.entries(w.confidence)[0];
+      wh.push(chip(`confidence <b>${op} ${v}</b>`, "when")); }
+    Object.entries(w.noul||{}).forEach(([q,c]) => { const [op,v] = Object.entries(c)[0];
+      wh.push(chip(`${esc(q)} <b>${op} ${v}</b>`, "when")); });
+    if (!wh.length) wh.push(chip("<b>always</b> (catch-all)", "when"));
+    const th = [ chip(`action <b>${esc(t.action)}</b>`, "then"),
+      chip(`worker <b>${esc(t.worker ?? "—")}</b>`, "then"),
+      chip(`risk <b>${esc(t.risk)}</b>`, "then") ];
+    const d = document.createElement("div"); d.className = "rule";
+    d.innerHTML = `<h3>#${i+1} ${esc(r.name)}</h3>
+      <div class="desc">${esc(r.description||"")}</div>
+      <div class="chips">${wh.join("")}</div>
+      <div class="chips">${th.join("")}</div>
+      <div class="row-actions">
+        <button class="ghost small" data-a="up" ${i===0?"disabled":""}>↑</button>
+        <button class="ghost small" data-a="down" ${i===TREE.length-1?"disabled":""}>↓</button>
+        <button class="ghost small" data-a="edit">Edit</button>
+        <button class="danger small" data-a="del">Delete</button>
+      </div>`;
+    d.querySelectorAll("button").forEach(b => b.onclick = () => {
+      const a = b.dataset.a;
+      if (a==="up" && i>0) [TREE[i-1],TREE[i]]=[TREE[i],TREE[i-1]];
+      if (a==="down" && i<TREE.length-1) [TREE[i+1],TREE[i]]=[TREE[i],TREE[i+1]];
+      if (a==="del" && confirm(`Delete rule "${r.name}"?`)) TREE.splice(i,1);
+      if (a==="edit") openEditor(i);
+      if (a!=="edit") { renderRules(); setStatus("Unsaved changes", ""); }
+    });
+    el.appendChild(d);
+  });
+}
+
+function fillAgents(sel, any) {
+  sel.innerHTML = (any?`<option value="">(any)</option>`:`<option value="">(none)</option>`)
+    + SPEC.agents.map(a=>`<option>${a}</option>`).join("");
+}
+function fillChoices() {
+  const a = $("f_agent").value, sel = $("f_choice");
+  sel.innerHTML = `<option value="">(any)</option>`
+    + ((SPEC.choices[a]||[]).map(c=>`<option>${c}</option>`).join(""));
+}
+function fillNouls() {
+  document.querySelectorAll("#f_nouls .noul-row select.q").forEach(s => {
+    const cur = s.value, a = $("f_agent").value;
+    s.innerHTML = (SPEC.nouls[a]||[]).map(q=>`<option>${q}</option>`).join("");
+    if ([...s.options].some(o=>o.value===cur)) s.value = cur;
+  });
+}
+function addNoulRow(q="", op=">", v="0.5") {
+  const row = document.createElement("div"); row.className = "noul-row";
+  row.innerHTML = `<select class="q"></select>
+    <select class="op">${SPEC.operators.map(o=>`<option ${o===op?"selected":""}>${o}</option>`).join("")}</select>
+    <input class="val" type="number" min="0" max="1" step="0.05" value="${v}" style="max-width:90px">
+    <button class="danger small" type="button">✕</button>`;
+  row.querySelector("button").onclick = () => row.remove();
+  $("f_nouls").appendChild(row); fillNouls();
+  if (q) row.querySelector(".q").value = q;
+}
+
+function openEditor(i) {
+  editing = i;
+  const r = i >= 0 ? TREE[i] : {name:"", description:"", when:{}, then:{action:"", worker:null, risk:"medium", message:""}};
+  $("editorTitle").textContent = i >= 0 ? "Edit rule" : "New rule";
+  $("f_name").value = r.name || ""; $("f_desc").value = r.description || "";
+  $("f_agent").value = r.when.agent || ""; fillChoices();
+  $("f_choice").value = r.when.choice || "";
+  const conf = r.when.confidence;
+  $("f_conf_on").checked = !!conf; $("f_conf_row").style.display = conf?"flex":"none";
+  if (conf) { const [op,v] = Object.entries(conf)[0]; $("f_conf_op").value = op; $("f_conf_val").value = v; }
+  $("f_nouls").innerHTML = "";
+  Object.entries(r.when.noul||{}).forEach(([q,c]) => { const [op,v] = Object.entries(c)[0]; addNoulRow(q,op,v); });
+  fillNouls();
+  $("f_action").value = r.then.action || "";
+  $("f_worker").value = r.then.worker || "";
+  $("f_risk").value = r.then.risk || "medium";
+  $("f_message").value = r.then.message || "";
+  $("editor").style.display = "block";
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+function closeEditor() { $("editor").style.display = "none"; editing = -1; }
+
+function saveEditor() {
+  const name = $("f_name").value.trim();
+  if (!name) return alert("Give the rule a name.");
+  const action = $("f_action").value.trim();
+  if (!action) return alert("Give the rule an action.");
+  const when = {};
+  if ($("f_agent").value) when.agent = $("f_agent").value;
+  if ($("f_choice").value) when.choice = $("f_choice").value;
+  if ($("f_conf_on").checked)
+    when.confidence = {[$("f_conf_op").value]: parseFloat($("f_conf_val").value)};
+  const noul = {};
+  document.querySelectorAll("#f_nouls .noul-row").forEach(row => {
+    noul[row.querySelector(".q").value] =
+      {[row.querySelector(".op").value]: parseFloat(row.querySelector(".val").value)};
+  });
+  if (Object.keys(noul).length) when.noul = noul;
+  const rule = {name, description: $("f_desc").value.trim(), when,
+    then: {action, worker: $("f_worker").value || null,
+           risk: $("f_risk").value, message: $("f_message").value.trim()}};
+  if (editing >= 0) TREE[editing] = rule; else TREE.push(rule);
+  closeEditor(); renderRules(); setStatus("Unsaved changes", "");
+}
+
+function verdictHTML(dec, out) {
+  const snap = `<pre>${esc(JSON.stringify(out, null, 1))}</pre>`;
+  return `<div class="verdict ${dec.risk}"><b>→ ${esc(dec.action)}</b>
+    <span class="hint">via rule "${esc(dec.rule)}" · worker: ${esc(dec.worker ?? "—")} · risk: ${esc(dec.risk)}</span>
+    ${dec.message?`<div style="margin-top:6px">${esc(dec.message)}</div>`:""}</div>${snap}`;
+}
+
+async function init() {
+  SPEC = await api("GET", "/policy/spec");
+  ["f_conf_op"].forEach(id => $(id).innerHTML =
+    SPEC.operators.map(o=>`<option>${o}</option>`).join(""));
+  fillAgents($("f_agent"), true); fillAgents($("t_agent"), false);
+  fillAgents($("f_worker"), false); $("f_worker").options[0].text = "(none)";
+  $("f_risk").innerHTML = SPEC.risks.map(r=>`<option>${r}</option>`).join("");
+  $("actions").innerHTML = SPEC.actions.map(a=>`<option value="${a}">`).join("");
+  $("f_agent").onchange = () => { fillChoices(); fillNouls(); };
+  $("f_conf_on").onchange = e => $("f_conf_row").style.display = e.target.checked?"flex":"none";
+  const tree = await api("GET", "/policy/tree");
+  TREE = tree.rules; renderRules(); setStatus("Tree loaded", "ok");
+
+  $("addRule").onclick = () => openEditor(-1);
+  $("f_save").onclick = saveEditor;
+  $("f_cancel").onclick = closeEditor;
+  $("f_add_noul").onclick = () => addNoulRow();
+  $("reloadTree").onclick = async () => {
+    const t = await api("GET", "/policy/tree"); TREE = t.rules;
+    renderRules(); setStatus("Tree reloaded", "ok");
+  };
+  $("saveTree").onclick = async () => {
+    try { await api("PUT", "/policy/tree", {rules: TREE});
+      setStatus("✓ Saved and live", "ok");
+    } catch(e) { setStatus("✕ " + e.message, "bad"); alert("Could not save:\n\n" + e.message); }
+  };
+  $("t_run").onclick = async () => {
+    const q = $("t_query").value.trim(), a = $("t_agent").value;
+    if (!q) return alert("Type a query first.");
+    $("t_result").innerHTML = "<span class='hint'>Running…</span>";
+    try {
+      const r = await api("POST", "/policy/test", {query: q, worker_agent: a});
+      $("t_result").innerHTML = verdictHTML(r.decision, r.analyzer_output);
+    } catch(e) { $("t_result").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
+  };
+  $("t_run2").onclick = async () => {
+    let parsed; try { parsed = JSON.parse($("t_json").value); }
+    catch(e) { return alert("That JSON doesn't parse: " + e.message); }
+    try {
+      const r = await api("POST", "/policy/test", {analyzer_output: parsed});
+      $("t_result2").innerHTML = verdictHTML(r.decision, r.analyzer_output);
+    } catch(e) { $("t_result2").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
+  };
+}
+init().catch(e => setStatus("Failed to load: " + e.message, "bad"));
+</script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+# Decision tree for the A2A agent layer.
+#
+# HOW TO READ THIS (for non-technical editors):
+# - Rules are checked TOP TO BOTTOM. The FIRST rule whose conditions
+#   ("when") all match wins. Put specific rules first, general ones last.
+# - "agent" = which worker agent the analyzer ran for
+#   (billing | orders | support | account | sales)
+# - "choice" = what the analyzer decided (depends on the agent)
+# - "confidence" = how sure the analyzer was (0.0 to 1.0)
+# - "noul" = yes/no flags the analyzer computed (0.0 = no, 1.0 = yes)
+# - Comparisons: > >= < <= == !=
+# - "then" says what the agent should DO: an action name, which worker
+#   handles it, and a risk level (low = safe to auto-run,
+#   medium = log carefully, high = needs a human).
+#
+# You can edit this file by hand, or use the Studio UI at /studio
+# (it only lets you pick valid values, so the tree can't break).
+
+version: 1
+
+rules:
+  - name: Auto-refund clear cases
+    description: >-
+      Customer wants a refund, analyzer is very sure, no sign of a
+      dispute, and an amount was mentioned. Safe to process automatically.
+    when:
+      agent: billing
+      choice: refund_request
+      confidence: {">=": 0.9}
+      noul:
+        is_dispute: {"<": 0.5}
+        amount_mentioned: {">": 0.5}
+    then:
+      action: process_refund
+      worker: billing
+      risk: low
+      message: "Refund approved automatically."
+
+  - name: Disputed charge → specialist
+    description: >-
+      The customer is disputing a charge. Don't auto-refund; open a
+      dispute case for a specialist instead.
+    when:
+      agent: billing
+      choice: refund_request
+      noul:
+        is_dispute: {">=": 0.5}
+    then:
+      action: open_dispute_case
+      worker: billing
+      risk: medium
+      message: "Dispute case opened for review."
+
+  - name: Track my order
+    description: >-
+      Customer wants to track a shipment and an order ID was mentioned.
+      Look it up and reply with the status.
+    when:
+      agent: orders
+      choice: track
+      confidence: {">=": 0.8}
+      noul:
+        has_order_id: {">": 0.5}
+    then:
+      action: lookup_order_status
+      worker: orders
+      risk: low
+      message: "Looking up your order status."
+
+  - name: Track my order, no ID
+    description: >-
+      Customer wants tracking but gave no order ID. Ask for it instead
+      of guessing.
+    when:
+      agent: orders
+      choice: track
+      noul:
+        has_order_id: {"<=": 0.5}
+    then:
+      action: ask_clarify
+      worker: orders
+      risk: low
+      message: "Could you share your order ID so I can look it up?"
+
+  - name: Delete account → human must approve
+    description: >-
+      Account deletion is irreversible. Never auto-run: always send to
+      a human for approval, no matter how confident the analyzer is.
+    when:
+      agent: account
+      choice: delete_account
+    then:
+      action: escalate_human
+      worker: null
+      risk: high
+      message: "Account deletion needs human approval."
+
+  - name: Low confidence → human
+    description: >-
+      The analyzer wasn't sure enough. Don't guess; let a human decide.
+    when:
+      confidence: {"<": 0.6}
+    then:
+      action: escalate_human
+      worker: null
+      risk: high
+      message: "Not sure enough — escalated for human review."
+
+  - name: Fallback — ask a clarifying question
+    description: >-
+      Nothing above matched. Ask the customer to clarify instead of
+      doing the wrong thing.
+    when: {}
+    then:
+      action: ask_clarify
+      worker: null
+      risk: low
+      message: "Could you tell me a bit more about what you need?"
