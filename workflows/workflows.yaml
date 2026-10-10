@@ -58,7 +58,7 @@ workflows:
         on_failure: abort
       - id: place
         action: place
-        needs_slots: [items, address]
+        needs_slots: [address]
         on_success: complete
         on_failure: abort
 
