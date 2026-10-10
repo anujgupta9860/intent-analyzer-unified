@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir \
 
 COPY src/ ./src/
 COPY policy/ ./policy/
+COPY workflows/ ./workflows/
 COPY studio/ ./studio/
 COPY entrypoint.py .
 
