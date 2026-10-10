@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+train/data/
+models/
+model-hub/
+*.egg-info/
