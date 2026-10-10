@@ -63,6 +63,30 @@ curl -s -X POST localhost:8081/analyze -H 'content-type: application/json' \
   | python3 -m json.tool
 ```
 
+## Decision framework (layman-configurable)
+
+The analyzer turns text into structured facts; the **decision tree** turns
+facts into actions for the A2A agent layer. Rules live in
+`policy/decision-tree.yaml` — plain YAML a non-technical person can read —
+and are edited visually in the **Decision Tree Studio**:
+
+```bash
+ANALYZER_CHECKPOINT_DIR=models uvicorn src.app:app --port 8081
+# open http://localhost:8081/studio
+```
+
+- Rules are checked **top to bottom, first match wins**. Conditions use
+  only valid values (agents, choices, Noul flags come from the analyzer
+  spec), comparisons `> >= < <= == !=` on confidence and flag values.
+- The Studio's **test panel** dry-runs any query (or a hand-made analyzer
+  output) and shows which rule fired and what action results.
+- Saving validates the whole tree first — an invalid rule is rejected
+  with a plain-English error naming the rule and field.
+- `POST /decide {"query", "worker_agent"}` is the agent integration
+  point: analyzer output + policy decision (`action`, `worker`, `risk`)
+  in one call, ready for A2A dispatch. High-risk decisions
+  (e.g. `delete_account` → `escalate_human`) never auto-execute.
+
 ## API
 
 | Method | Path | Description |
