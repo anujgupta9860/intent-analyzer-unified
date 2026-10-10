@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 _state: dict = {}
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-POLICY_PATH = REPO_ROOT / "policy" / "decision-tree.yaml"
+DEFAULT_POLICY_PATH = REPO_ROOT / "policy" / "decision-tree.yaml"
 STUDIO_INDEX = REPO_ROOT / "studio" / "index.html"
 
 # Known actions offered in the Studio UI (free text also allowed).
@@ -56,12 +56,18 @@ POLICY_ACTIONS = [
 ]
 
 
+def _policy_path() -> Path:
+    settings = _state.get("settings")
+    override = (settings.policy_path if settings else "") or ""
+    return Path(override) if override else DEFAULT_POLICY_PATH
+
+
 def _policy_engine():
     from policy.engine import PolicyEngine, PolicyError
     eng = _state.get("policy")
     if eng is None:
         try:
-            eng = PolicyEngine(POLICY_PATH)
+            eng = PolicyEngine(_policy_path())
         except PolicyError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         _state["policy"] = eng
@@ -84,8 +90,8 @@ async def lifespan(app: FastAPI):
              settings.checkpoint_dir, client.available())
     try:
         eng = _policy_engine()
-        log.info("policy engine ready: %d rules from %s",
-                 len(eng.rules), POLICY_PATH)
+        log.info("policy engine ready: %d rules from %s (hot-reload on)",
+                 len(eng.rules), _policy_path())
     except HTTPException as exc:
         log.warning("policy engine unavailable: %s", exc.detail)
     yield
@@ -227,7 +233,24 @@ def policy_tree():
     import yaml
     eng = _policy_engine()
     return {"version": eng.version,
-            "rules": yaml.safe_load(POLICY_PATH.read_text())["rules"]}
+            "rules": yaml.safe_load(_policy_path().read_text())["rules"]}
+
+
+@app.get("/policy/status")
+def policy_status():
+    """Hot-reload status: is the live tree healthy, when did it reload,
+    and what was the last error (if a bad edit was rejected)."""
+    return _policy_engine().status()
+
+
+@app.post("/policy/reload")
+def policy_reload():
+    """Force a reload check now (normally automatic on every decision)."""
+    eng = _policy_engine()
+    reloaded = eng.maybe_reload()
+    st = eng.status()
+    st["reloaded_now"] = reloaded
+    return st
 
 
 class PolicyTreePut(BaseModel):
@@ -244,7 +267,7 @@ def policy_tree_put(req: PolicyTreePut):
         eng.validate_tree({"rules": req.rules})
     except PolicyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    POLICY_PATH.write_text(yaml.safe_dump(
+    _policy_path().write_text(yaml.safe_dump(
         {"version": eng.version, "rules": req.rules},
         sort_keys=False, allow_unicode=True))
     eng.reload()
@@ -266,6 +289,7 @@ class PolicyTestRequest(BaseModel):
 def policy_test(req: PolicyTestRequest):
     """Dry-run the decision tree: query -> analyzer -> policy -> decision."""
     eng = _policy_engine()
+    eng.maybe_reload()  # pick up on-disk edits without redeploy
     if req.analyzer_output is not None:
         output = req.analyzer_output
     elif req.query and req.worker_agent:
@@ -322,6 +346,7 @@ def decide(req: DecideRequest):
     except AnalyzerError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     eng = _policy_engine()
+    eng.maybe_reload()  # pick up on-disk edits without redeploy
     decision = eng.decide(analyzer_out)
     return {
         "agent": agent,

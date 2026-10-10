@@ -118,3 +118,64 @@ def test_rejects_empty_rules():
     eng = engine()
     with pytest.raises(PolicyError, match="non-empty"):
         eng.validate_tree({"rules": []})
+
+
+def _write_tree(tmp_path, rules):
+    import yaml
+    p = tmp_path / "tree.yaml"
+    p.write_text(yaml.safe_dump({"version": 1, "rules": rules}))
+    return p
+
+
+def _rule(name, choice="refund_request", conf_op=">=", conf=0.9,
+          action="process_refund"):
+    return {
+        "name": name, "description": "",
+        "when": {"agent": "billing", "choice": choice,
+                 "confidence": {conf_op: conf}},
+        "then": {"action": action, "worker": "billing", "risk": "low"},
+    }
+
+
+def test_hot_reload_picks_up_new_rule(tmp_path):
+    eng = PolicyEngine(_write_tree(tmp_path, [_rule("v1")]))
+    out1 = {"agent": "billing", "billing_action": "refund_request",
+            "choice_confidence": 0.95}
+    assert eng.decide(out1).rule_name == "v1"
+    # edit the file on disk: new rule first
+    eng2_path = _write_tree(tmp_path, [
+        _rule("v2", action="open_dispute_case"), _rule("v1")])
+    eng.path = eng2_path
+    assert eng.maybe_reload() is True
+    assert eng.decide(out1).rule_name == "v2"
+
+
+def test_hot_reload_no_change_noop(tmp_path):
+    eng = PolicyEngine(_write_tree(tmp_path, [_rule("v1")]))
+    assert eng.maybe_reload() is False
+
+
+def test_hot_reload_rejects_broken_tree_keeps_old(tmp_path):
+    p = _write_tree(tmp_path, [_rule("v1")])
+    eng = PolicyEngine(p)
+    out1 = {"agent": "billing", "billing_action": "refund_request",
+            "choice_confidence": 0.95}
+    # write a broken tree
+    p.write_text("rules:\n  - name: bad\n    when: {agent: nope}\n    then: {action: x}\n")
+    assert eng.maybe_reload() is False
+    assert eng.last_error is not None and "unknown agent" in eng.last_error
+    # old tree still serves
+    assert eng.decide(out1).rule_name == "v1"
+    assert eng.status()["live"] is False
+    # fix the file -> reloads again
+    _write_tree(tmp_path, [_rule("v2", action="open_dispute_case")])
+    assert eng.maybe_reload() is True
+    assert eng.decide(out1).rule_name == "v2"
+    assert eng.status()["live"] is True
+
+
+def test_status_shape(tmp_path):
+    eng = PolicyEngine(_write_tree(tmp_path, [_rule("v1")]))
+    st = eng.status()
+    assert st["rules"] == 1 and st["live"] is True
+    assert st["last_reload"] is not None and st["last_error"] is None

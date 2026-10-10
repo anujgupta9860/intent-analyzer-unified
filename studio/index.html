@@ -63,6 +63,7 @@ Only valid values are offered, so the tree can't break.</div>
   <button id="saveTree">💾 Save tree</button>
   <button id="reloadTree" class="ghost">↺ Reload</button>
   <span id="status"></span>
+  <span id="live" class="hint" title="The agent hot-reloads this file on every decision — no redeploy needed"></span>
 </div>
 
 <div class="panel" id="editor">
@@ -252,6 +253,20 @@ function saveEditor() {
   closeEditor(); renderRules(); setStatus("Unsaved changes", "");
 }
 
+async function refreshLive() {
+  try {
+    const s = await api("GET", "/policy/status");
+    const el = $("live");
+    if (s.live) {
+      el.textContent = `● live: ${s.rules} rules${s.last_reload ? " · updated " + s.last_reload.slice(11,19) + " UTC" : ""} · auto-reloads on edit`;
+      el.style.color = "var(--ok)";
+    } else {
+      el.textContent = `● serving last good tree — rejected edit: ${s.last_error}`;
+      el.style.color = "var(--bad)";
+    }
+  } catch(e) { /* status unavailable; ignore */ }
+}
+
 function verdictHTML(dec, out) {
   const snap = `<pre>${esc(JSON.stringify(out, null, 1))}</pre>`;
   return `<div class="verdict ${dec.risk}"><b>→ ${esc(dec.action)}</b>
@@ -271,6 +286,7 @@ async function init() {
   $("f_conf_on").onchange = e => $("f_conf_row").style.display = e.target.checked?"flex":"none";
   const tree = await api("GET", "/policy/tree");
   TREE = tree.rules; renderRules(); setStatus("Tree loaded", "ok");
+  refreshLive(); setInterval(refreshLive, 10000);
 
   $("addRule").onclick = () => openEditor(-1);
   $("f_save").onclick = saveEditor;

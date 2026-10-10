@@ -22,3 +22,7 @@ class Settings:
             "FEEDBACK_ENABLED", "true").strip().lower() in (
             "1", "true", "yes", "on")
         self.log_level: str = _get("LOG_LEVEL", "INFO").upper()
+        # Decision-tree YAML path. Point this at a mounted volume in
+        # deployment; the agent hot-reloads it when the file changes,
+        # no restart or redeploy needed.
+        self.policy_path: str = _get("ANALYZER_POLICY_PATH", "")

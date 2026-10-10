@@ -86,29 +86,75 @@ def _check_cmp(actual: float, op: str, expected: float) -> bool:
 
 
 class PolicyEngine:
-    """Loads a decision-tree YAML and evaluates analyzer outputs."""
+    """Loads a decision-tree YAML and evaluates analyzer outputs.
+
+    Hot-reload: call maybe_reload() before deciding (the service does
+    this on every /decide and /policy/test call). When the YAML file
+    changes on disk, the new tree is validated first — only a valid
+    tree replaces the live one. A broken edit keeps serving the last
+    good tree and records the error (see status()).
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.rules: list[dict] = []
         self.version: int = 1
+        self._mtime: float | None = None
+        self.last_reload: str | None = None
+        self.last_error: str | None = None
         self.reload()
 
     # ------------------------------------------------------------------ API
     def reload(self) -> None:
         import yaml
+        from datetime import datetime, timezone
         if not self.path.exists():
             raise PolicyError(
                 f"decision tree not found: {self.path} "
                 "(copy policy/decision-tree.yaml into place)")
         data = yaml.safe_load(self.path.read_text()) or {}
-        self.version = data.get("version", 1)
         rules = data.get("rules", [])
         if not isinstance(rules, list) or not rules:
             raise PolicyError("decision tree must contain a non-empty 'rules' list")
         for i, rule in enumerate(rules):
             self._validate_rule(rule, i)
+        # swap only after full validation: never serve a half-broken tree
+        self.version = data.get("version", 1)
         self.rules = rules
+        self._mtime = self.path.stat().st_mtime
+        self.last_reload = datetime.now(timezone.utc).isoformat()
+        self.last_error = None
+
+    def maybe_reload(self) -> bool:
+        """Reload if the file changed. Returns True when a new tree went live.
+
+        A broken file keeps the previous tree serving and records the
+        error instead of raising.
+        """
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            return False
+        if self._mtime is not None and mtime <= self._mtime:
+            return False
+        try:
+            self.reload()
+            return True
+        except PolicyError as exc:
+            # keep serving the last good tree; surface the error via status()
+            self._mtime = mtime  # don't retry until the file changes again
+            self.last_error = str(exc)
+            return False
+
+    def status(self) -> dict:
+        return {
+            "path": str(self.path),
+            "version": self.version,
+            "rules": len(self.rules),
+            "last_reload": self.last_reload,
+            "last_error": self.last_error,
+            "live": self.last_error is None,
+        }
 
     def decide(self, analyzer_output: dict) -> Decision:
         """Evaluate rules top-to-bottom; first full match wins."""
