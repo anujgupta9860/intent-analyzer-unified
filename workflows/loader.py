@@ -70,6 +70,31 @@ class WorkflowLoader:
                         pass
                 if not isinstance(s.get("needs_slots", []), list):
                     raise WorkflowError(f"{swhere}: needs_slots must be a list")
+                # Optional per-step skill policy: ordered rules mapping
+                # filled slots -> skill. First matching rule wins; if none
+                # match, System 1 falls back to the step's action hint.
+                # Example:
+                #   skill_policy:
+                #     - when: {express: true}
+                #       skill: place_express
+                #     - when: {gift_wrap: true}
+                #       skill: place_gift
+                sp = s.get("skill_policy", [])
+                if not isinstance(sp, list):
+                    raise WorkflowError(
+                        f"{swhere}: skill_policy must be a list")
+                for k, rule in enumerate(sp):
+                    rwhere = f"{swhere} skill_policy rule #{k + 1}"
+                    if not isinstance(rule, dict):
+                        raise WorkflowError(
+                            f"{rwhere}: each rule must be a mapping")
+                    if not rule.get("skill"):
+                        raise WorkflowError(
+                            f"{rwhere}: missing 'skill'")
+                    when = rule.get("when", {})
+                    if not isinstance(when, dict):
+                        raise WorkflowError(
+                            f"{rwhere}: 'when' must be a slot->value mapping")
             # validate transition targets now that all ids are known
             for s in steps:
                 for key in ("on_success", "on_failure"):
