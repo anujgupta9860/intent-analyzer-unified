@@ -214,6 +214,9 @@ def main() -> None:
         return temp
 
     calibration: dict[str, dict] = {}
+    # The Trainer handles device placement, but this manual loop must do it
+    # explicitly — on MPS/CUDA the model is not on CPU.
+    _dev = next(core.parameters()).device
     with torch.no_grad():
         for agent in AGENT_IDS:
             idx = agent_to_idx[agent]
@@ -225,7 +228,7 @@ def main() -> None:
             for i in range(0, len(sel), 32):
                 chunk = sel[i:i + 32]
                 batch = {
-                    k: torch.tensor([v[j] for j in chunk])
+                    k: torch.tensor([v[j] for j in chunk], device=_dev)
                     for k, v in val_enc.items()
                     if k not in ("choice_labels", "noul_labels", "noul_mask")
                 }
@@ -233,9 +236,9 @@ def main() -> None:
                          attention_mask=batch["attention_mask"],
                          agent_ids=batch["agent_ids"])
                 # inference path routes via agent_ids[0]; chunk is
-                # single-agent so this is exact
-                cl_list.append(o["choice_logits"])
-                nl_list.append(o["noul_logits"])
+                # single-agent so this is exact; logits back to CPU for metrics
+                cl_list.append(o["choice_logits"].cpu())
+                nl_list.append(o["noul_logits"].cpu())
                 ct_list.append(torch.tensor(
                     [val_enc["choice_labels"][j] for j in chunk]))
                 nt_list.append(torch.tensor(
