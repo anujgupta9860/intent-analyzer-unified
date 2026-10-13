@@ -45,12 +45,6 @@ from src.unified_model import UnifiedAnalyzer  # noqa: E402
 MODEL_ID = str(Path(__file__).resolve().parent.parent
                / "model-hub" / "ModernBERT-base")
 
-_CHOICE_QID = {
-    "billing": "billing_action", "orders": "order_action",
-    "support": "support_topic", "account": "account_action",
-    "sales": "sales_intent",
-}
-
 
 def load_records(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
@@ -88,7 +82,7 @@ def main() -> None:
                 f"missing {p} — run: python train/build_dataset.py "
                 f"--agent {agent} --out {data_dir}")
         recs = load_records(p)
-        cqid = _CHOICE_QID[agent]
+        cqid = choice_question(agent)
         labels = choice_options(agent)
         nqs = noul_questions(agent)
         label2id = {l: i for i, l in enumerate(labels)}
@@ -103,7 +97,7 @@ def main() -> None:
     # --- stratified split per agent, then merge ---
     train_all, val_all = [], []
     for agent, recs in per_agent.items():
-        cqid = _CHOICE_QID[agent]
+        cqid = choice_question(agent)
         strat = [r[cqid] for r in recs]
         tr, va = train_test_split(recs, test_size=0.2,
                                   random_state=args.seed, stratify=strat)
@@ -121,7 +115,7 @@ def main() -> None:
                         padding=True, max_length=128)
         enc["agent_ids"] = [agent_to_idx[a] for a in agents]
         enc["choice_labels"] = [
-            choice_options(a).index(r[_CHOICE_QID[a]])
+            choice_options(a).index(r[choice_question(a)])
             for a, r in pairs
         ]
         nl, nm = [], []
@@ -258,7 +252,7 @@ def main() -> None:
             nprobs = torch.sigmoid(nl / torch.tensor(t_noul))
             nacc = (((nprobs >= 0.5).float() == nt).float().mean().item())
             calibration[agent] = {
-                "choice_question": _CHOICE_QID[agent],
+                "choice_question": choice_question(agent),
                 "choice_labels": choice_options(agent),
                 "noul_questions": noul_questions(agent),
                 "temperature_choice": t_choice,

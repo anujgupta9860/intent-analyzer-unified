@@ -27,7 +27,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.analyzer_questions import (  # noqa: E402
     AGENT_IDS,
+    CUSTOM_AGENT_IDS,
+    DATASET_SPECS,
     choice_options,
+    choice_question,
     noul_questions,
 )
 
@@ -289,8 +292,27 @@ _SEEDS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+def _noul_rules_custom(agent: str, choice_label: str, query: str) -> dict[str, float]:
+    """Data-driven noul labels for UI-defined agents.
+
+    A flag fires when the seed query contains one of its keywords
+    (case-insensitive substring) or the seed's choice label is in its
+    implied_by list.
+    """
+    q = query.lower()
+    out: dict[str, float] = {}
+    for rule in DATASET_SPECS[agent]["noul_rules"]:
+        hit = choice_label in rule.get("implied_by", []) or any(
+            kw.lower() in q for kw in rule.get("keywords", [])
+        )
+        out[rule["name"]] = 1.0 if hit else 0.0
+    return out
+
+
 def _noul_rules(agent: str, choice_label: str, query: str) -> dict[str, float]:
     """Deterministic noul labels from the SEED (pre-template) query."""
+    if agent in CUSTOM_AGENT_IDS:
+        return _noul_rules_custom(agent, choice_label, query)
     q = query
     if agent == "billing":
         return {
@@ -349,14 +371,18 @@ def _noul_rules(agent: str, choice_label: str, query: str) -> dict[str, float]:
 def build_agent_records(agent: str, repeat: int, seed: int = 42) -> list[dict]:
     """Emit labeled records for one agent."""
     rng = random.Random(seed)
-    choice_qid = {
-        "billing": "billing_action", "orders": "order_action",
-        "support": "support_topic", "account": "account_action",
-        "sales": "sales_intent",
-    }[agent]
+    choice_qid = choice_question(agent)
+    if agent in CUSTOM_AGENT_IDS:
+        seed_pairs = [
+            (label, q)
+            for label, qs in DATASET_SPECS[agent]["seeds"].items()
+            for q in qs
+        ]
+    else:
+        seed_pairs = _SEEDS[agent]
     expected_noul = set(noul_questions(agent))
     records: list[dict] = []
-    for choice_label, seed_query in _SEEDS[agent]:
+    for choice_label, seed_query in seed_pairs:
         # Labels from the SEED — template noise never changes them.
         noul = _noul_rules(agent, choice_label, seed_query)
         assert set(noul) == expected_noul, (
@@ -393,9 +419,7 @@ def main() -> None:
             for r in recs:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         # label balance report
-        cq = {"billing": "billing_action", "orders": "order_action",
-              "support": "support_topic", "account": "account_action",
-              "sales": "sales_intent"}[agent]
+        cq = choice_question(agent)
         bal = {}
         for r in recs:
             bal[r[cq]] = bal.get(r[cq], 0) + 1

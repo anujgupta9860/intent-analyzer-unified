@@ -24,11 +24,14 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -225,6 +228,118 @@ def studio():
     if not STUDIO_INDEX.exists():
         raise HTTPException(status_code=404, detail="studio UI not installed")
     return FileResponse(STUDIO_INDEX, media_type="text/html")
+
+
+# ------------------------------------------------------- training-data studio
+# The Studio "Training Data" tab defines NEW agents (choice taxonomy + noul
+# flags + seed queries) and builds their train/data/<agent>.jsonl. Custom
+# agents are stored as agents/<agent>.json and merged into the analyzer
+# specs at import; restart the service to serve/train with a new agent.
+
+
+@app.get("/studio/agents")
+def studio_agents():
+    """List every agent's spec for the Training Data tab."""
+    from . import analyzer_questions as aq
+
+    aq.refresh_custom_agents()
+    agents = []
+    for agent in aq.AGENT_IDS:
+        data_path = REPO_ROOT / "train" / "data" / f"{agent}.jsonl"
+        agents.append({
+            "agent": agent,
+            "custom": agent in aq.CUSTOM_AGENT_IDS,
+            "choice_question": aq.choice_question(agent),
+            "labels": aq.choice_options(agent),
+            "noul": aq.noul_questions(agent),
+            "records": sum(1 for _ in data_path.open(encoding="utf-8"))
+            if data_path.exists() else 0,
+        })
+    return {"agents": agents}
+
+
+@app.get("/studio/agents/{agent}")
+def studio_agent_spec(agent: str):
+    """Full spec of one agent (for editing in the Studio)."""
+    from . import analyzer_questions as aq
+
+    aq.refresh_custom_agents()
+    if agent not in aq.AGENT_IDS:
+        raise HTTPException(status_code=404, detail=f"unknown agent: {agent}")
+    if agent in aq.CUSTOM_AGENT_IDS:
+        path = aq.AGENTS_DIR / f"{agent}.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+    # Built-ins: synthesize the editable shape from the code spec.
+    spec = aq.agent_spec(agent)
+    cq = aq.choice_question(agent)
+    return {
+        "agent": agent,
+        "choice_question": cq,
+        "choice_instructions": spec["questions"][cq]["instructions"],
+        "labels": {k: v for k, v in spec["questions"][cq]["criteria"].items()},
+        "noul": [
+            {"name": qid, "instructions": q["instructions"],
+             "keywords": [], "implied_by": []}
+            for qid, q in spec["questions"].items() if q["type"] == "noul"
+        ],
+        "seeds": {},
+        "builtin": True,
+    }
+
+
+@app.post("/studio/agents")
+async def studio_save_agent(request: Request):
+    """Create a custom agent spec (agents/<agent>.json)."""
+    from . import analyzer_questions as aq
+
+    try:
+        spec = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="request body must be JSON")
+    try:
+        aq.validate_custom_spec(spec)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    aq.AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = aq.AGENTS_DIR / f"{spec['agent']}.json"
+    path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+    aq.refresh_custom_agents()
+    return {"ok": True, "agent": spec["agent"],
+            "note": "restart the service to serve/train with this agent"}
+
+
+@app.post("/studio/agents/{agent}/build")
+def studio_build_agent(agent: str, repeat: int = 6):
+    """Build train/data/<agent>.jsonl and return stats + sample records."""
+    from . import analyzer_questions as aq
+
+    aq.refresh_custom_agents()
+    if agent not in aq.AGENT_IDS:
+        raise HTTPException(status_code=404, detail=f"unknown agent: {agent}")
+    if not 1 <= repeat <= 20:
+        raise HTTPException(status_code=400, detail="repeat must be 1-20")
+    out_dir = REPO_ROOT / "train" / "data"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "train" / "build_dataset.py"),
+         "--agent", agent, "--out", str(out_dir), "--repeat", str(repeat)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500,
+                            detail=f"dataset build failed: {proc.stderr[-2000:]}")
+    path = out_dir / f"{agent}.jsonl"
+    records = [json.loads(line) for line in
+               path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    cq = aq.choice_question(agent)
+    balance: dict[str, int] = {}
+    for r in records:
+        balance[r[cq]] = balance.get(r[cq], 0) + 1
+    noul_pos = {n: sum(r[n] for r in records) for n in aq.noul_questions(agent)}
+    return {"ok": True, "agent": agent, "records": len(records),
+            "choice_balance": balance, "noul_positives": noul_pos,
+            "samples": records[:5], "log": proc.stdout.strip().splitlines()}
 
 
 @app.get("/policy/spec")

@@ -140,6 +140,27 @@ track.
 `--model bert-base-uncased`. One flag; everything else identical. Do not
 mix encoder tracks in one deployment.
 
+## Custom agents (Studio Training Data tab)
+
+A **new agent** needs no code changes:
+
+1. Open the Studio → **Training Data** tab → **+ New agent**.
+2. Define the Choice question (its action taxonomy: labels + what each means),
+   Noul flags (instructions + trigger keywords + implied-by labels), and
+   2+ seed queries per label.
+3. **Save agent** → writes `agents/<agent>.json` (validated; bad files are
+   ignored with a warning, keeping the last good state).
+4. **Build dataset** → generates `train/data/<agent>.jsonl` (synthetic
+   paraphrases of your seeds; Noul labels from your keyword/implied-by rules),
+   with a balance report and sample preview.
+5. Retrain (`train analyzer` via `scripts/laya-stack.sh`, or
+   `python train/finetune_unified.py --data train/data --out models/unified`)
+   and restart the service to serve it.
+
+The JSON format is documented in `agents/README.md`. Built-in agents stay in
+code (`src/analyzer_questions.py`); custom files are merged in at import, so
+training, serving, and the dataset builder all see one spec.
+
 ## Deploy
 
 Docker (bake or mount `models/unified/`), or Cloud Run via `entrypoint.py`,

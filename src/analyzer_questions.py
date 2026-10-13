@@ -21,10 +21,17 @@ flags (needs-x probabilities). Agents:
 """
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 #: Agent id -> spec. Keys are stable and also used as the directory names
 #: for per-agent datasets (train/data/<agent>.jsonl) and checkpoints
 #: (models/<agent>/).
-AGENT_IDS = ("billing", "orders", "support", "account", "sales")
+#: NOTE: AGENT_IDS is extended at the bottom of this module with any
+#: UI-defined custom agents found in agents/*.json.
+_BUILTIN_AGENT_IDS = ("billing", "orders", "support", "account", "sales")
+AGENT_IDS = _BUILTIN_AGENT_IDS
 
 ANALYZERS: dict[str, dict] = {
     "billing": {
@@ -192,3 +199,159 @@ def question_ids(agent: str) -> list[str]:
     spec = ANALYZERS[agent]
     cq = spec["choice_question"]
     return [cq] + [qid for qid in spec["questions"] if qid != cq]
+
+
+# ---------------------------------------------------------------------------
+# Custom agents (defined through the Studio "Training Data" tab).
+#
+# A custom agent is one JSON file: agents/<agent>.json
+# {
+#   "agent": "refunds",
+#   "choice_question": "refund_action",
+#   "choice_instructions": "What refund action does this customer need?",
+#   "labels": {"request_refund": "asks for money back", ...},
+#   "noul": [
+#     {"name": "amount_mentioned", "instructions": "...",
+#      "keywords": ["$", "dollar"], "implied_by": ["request_refund"]}
+#   ],
+#   "seeds": {"request_refund": ["I want a refund", ...], ...}
+# }
+# Merged into ANALYZERS below so training, serving, and the dataset builder
+# all see the same spec. A restart picks up new/edited files.
+# ---------------------------------------------------------------------------
+
+AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
+
+#: Custom agent ids loaded from agents/*.json (subset of AGENT_IDS).
+CUSTOM_AGENT_IDS: tuple[str, ...] = ()
+
+#: agent -> {"seeds": {label: [query, ...]},
+#:           "noul_rules": [{"name", "keywords", "implied_by"}]}
+#: Used by train/build_dataset.py for UI-defined agents.
+DATASET_SPECS: dict[str, dict] = {}
+
+_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
+
+def validate_custom_spec(spec: dict) -> dict:
+    """Validate a UI-submitted custom agent spec. Returns it unchanged.
+
+    Raises ValueError with a human-readable message on any problem.
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("spec must be a JSON object")
+    agent = spec.get("agent", "")
+    if not isinstance(agent, str) or not _ID_RE.match(agent):
+        raise ValueError("agent must look like 'refunds' (lowercase, digits/_)")
+    if agent in _BUILTIN_AGENT_IDS:
+        raise ValueError(f"'{agent}' is a built-in agent and cannot be redefined")
+    cq = spec.get("choice_question", "")
+    if not isinstance(cq, str) or not _ID_RE.match(cq):
+        raise ValueError("choice_question must look like 'refund_action'")
+    ci = spec.get("choice_instructions", "")
+    if not isinstance(ci, str) or not ci.strip():
+        raise ValueError("choice_instructions is required")
+    labels = spec.get("labels")
+    if not isinstance(labels, dict) or not (2 <= len(labels) <= 20):
+        raise ValueError("labels: provide 2-20 labels")
+    for name, crit in labels.items():
+        if not isinstance(name, str) or not _ID_RE.match(name):
+            raise ValueError(f"bad label name: {name!r}")
+        if not isinstance(crit, str) or not crit.strip():
+            raise ValueError(f"label '{name}' needs a criteria description")
+    noul = spec.get("noul", [])
+    if not isinstance(noul, list) or len(noul) > 8:
+        raise ValueError("noul: provide 0-8 flags")
+    seen_n = set()
+    for n in noul:
+        if not isinstance(n, dict):
+            raise ValueError("each noul entry must be an object")
+        name = n.get("name", "")
+        if not isinstance(name, str) or not _ID_RE.match(name):
+            raise ValueError(f"bad noul name: {name!r}")
+        if name in seen_n:
+            raise ValueError(f"duplicate noul name: {name}")
+        seen_n.add(name)
+        if not isinstance(n.get("instructions", ""), str) or not n["instructions"].strip():
+            raise ValueError(f"noul '{name}' needs instructions")
+        kws = n.get("keywords", [])
+        if not isinstance(kws, list) or any(not isinstance(k, str) or not k.strip() for k in kws):
+            raise ValueError(f"noul '{name}': keywords must be non-empty strings")
+        impl = n.get("implied_by", [])
+        if not isinstance(impl, list) or any(i not in labels for i in impl):
+            raise ValueError(f"noul '{name}': implied_by must reference labels")
+    seeds = spec.get("seeds")
+    if not isinstance(seeds, dict) or set(seeds) != set(labels):
+        raise ValueError("seeds: provide seed queries for every label, no extras")
+    for label, qs in seeds.items():
+        if not isinstance(qs, list) or not (1 <= len(qs) <= 30):
+            raise ValueError(f"seeds for '{label}': provide 1-30 queries")
+        if any(not isinstance(q, str) or not q.strip() for q in qs):
+            raise ValueError(f"seeds for '{label}' must be non-empty strings")
+    return spec
+
+
+def refresh_custom_agents() -> tuple[str, ...]:
+    """Re-scan agents/*.json, picking up Studio-saved specs without restart.
+
+    Returns the current custom agent ids. Serving/training still need a
+    restart (they snapshot AGENT_IDS at import); the Studio endpoints call
+    this so save -> build works in one session.
+    """
+    global CUSTOM_AGENT_IDS
+    for agent in CUSTOM_AGENT_IDS:
+        ANALYZERS.pop(agent, None)
+        DATASET_SPECS.pop(agent, None)
+    CUSTOM_AGENT_IDS = ()
+    _load_custom_agents()
+    return CUSTOM_AGENT_IDS
+
+
+def _load_custom_agents() -> None:
+    """Merge agents/*.json into ANALYZERS / AGENT_IDS / DATASET_SPECS."""
+    global AGENT_IDS, CUSTOM_AGENT_IDS
+    customs: list[str] = []
+    if AGENTS_DIR.is_dir():
+        for path in sorted(AGENTS_DIR.glob("*.json")):
+            try:
+                spec = validate_custom_spec(json.loads(path.read_text(encoding="utf-8")))
+            except (ValueError, json.JSONDecodeError) as e:
+                # Broken custom file: keep the last good state, like the
+                # decision-tree hot-reload policy.
+                print(f"[analyzer_questions] ignoring {path.name}: {e}")
+                continue
+            agent = spec["agent"]
+            if agent in ANALYZERS:
+                print(f"[analyzer_questions] ignoring {path.name}: duplicate agent '{agent}'")
+                continue
+            cq = spec["choice_question"]
+            ANALYZERS[agent] = {
+                "choice_question": cq,
+                "questions": {
+                    cq: {
+                        "type": "choice",
+                        "instructions": spec["choice_instructions"],
+                        "criteria": dict(spec["labels"]),
+                    },
+                    **{
+                        n["name"]: {"type": "noul", "instructions": n["instructions"]}
+                        for n in spec["noul"]
+                    },
+                },
+                "custom": True,
+            }
+            DATASET_SPECS[agent] = {
+                "seeds": {k: list(v) for k, v in spec["seeds"].items()},
+                "noul_rules": [
+                    {"name": n["name"],
+                     "keywords": list(n.get("keywords", [])),
+                     "implied_by": list(n.get("implied_by", []))}
+                    for n in spec["noul"]
+                ],
+            }
+            customs.append(agent)
+    CUSTOM_AGENT_IDS = tuple(customs)
+    AGENT_IDS = _BUILTIN_AGENT_IDS + CUSTOM_AGENT_IDS
+
+
+_load_custom_agents()

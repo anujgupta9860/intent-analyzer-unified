@@ -51,6 +51,8 @@
   .verdict.high { border-color:var(--bad); background:#2a1414; }
   .verdict.medium { border-color:var(--warn); background:#2a2111; }
   .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+  table.samp { border-collapse:collapse; font-size:12px; margin-top:6px; }
+  table.samp td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; max-width:280px; }
   .tabs { display:flex; gap:8px; margin-bottom:18px; }
   .tabs button { background:transparent; color:var(--mut); border:1px solid var(--line); }
   .tabs button.active { background:var(--acc); color:#06121f; border-color:var(--acc); }
@@ -74,6 +76,7 @@ Only valid values are offered, so the tree can't break.</div>
   <button id="tabBtnTree" class="active">Decision Tree</button>
   <button id="tabBtnWf">Workflows</button>
   <button id="tabBtnSkills">Skills</button>
+  <button id="tabBtnData">Training Data</button>
 </div>
 
 <div id="tab-tree">
@@ -222,6 +225,46 @@ Only valid values are offered, so the tree can't break.</div>
       <div><label>&nbsp;</label><button id="sk_run" style="width:100%">Run</button></div>
     </div>
     <div id="sk_result"></div>
+  </div>
+</div>
+
+<div id="tab-data" style="display:none">
+<div class="sub">Define a <b>new agent's</b> intent taxonomy — choice labels, noul flags, seed queries —
+then generate its <b>train/data/&lt;agent&gt;.jsonl</b> training set. Built-in agents are shown for
+reference. Restart the service to serve or train with a new agent.</div>
+
+  <div class="bar">
+    <button id="addAgent">+ New agent</button>
+    <button id="reloadAgents" class="ghost">↺ Reload</button>
+    <span id="dstatus"></span>
+  </div>
+
+  <div class="panel" id="agentEditor" style="display:none">
+    <h2 id="agentEditorTitle">New agent</h2>
+    <label>Agent id (lowercase_underscores, e.g. refunds)</label>
+    <input id="a_id" placeholder="refunds">
+    <div class="inline">
+      <div><label>Choice question id</label><input id="a_cq" placeholder="refund_action"></div>
+      <div><label>&nbsp;</label><div class="hint">One Choice question per agent — its action taxonomy.</div></div>
+    </div>
+    <label>Choice instructions (what the model is asked)</label>
+    <input id="a_ci" placeholder="What refund action does this customer need?">
+    <label>Labels — name, what it means, and seed queries (one per line)</label>
+    <div id="a_labels"></div>
+    <button class="ghost small" id="a_add_label" type="button">+ Add label</button>
+    <label style="margin-top:12px">Noul flags — name, instructions, trigger keywords (comma-separated), implied-by labels</label>
+    <div id="a_noul"></div>
+    <button class="ghost small" id="a_add_noul" type="button">+ Add noul flag</button>
+    <div class="bar" style="margin-top:14px">
+      <button id="a_save">Save agent</button>
+      <button id="a_cancel" class="ghost">Cancel</button>
+    </div>
+  </div>
+
+  <div id="agentList"></div>
+  <div class="panel" id="buildPanel" style="display:none;margin-top:20px">
+    <h2>🏋️ Build result</h2>
+    <div id="buildResult"></div>
   </div>
 </div>
 
@@ -475,11 +518,14 @@ function showTab(which) {
   $("tab-tree").style.display = which === "tree" ? "block" : "none";
   $("tab-workflows").style.display = which === "workflows" ? "block" : "none";
   $("tab-skills").style.display = which === "skills" ? "block" : "none";
+  $("tab-data").style.display = which === "data" ? "block" : "none";
   $("tabBtnTree").classList.toggle("active", which === "tree");
   $("tabBtnWf").classList.toggle("active", which === "workflows");
   $("tabBtnSkills").classList.toggle("active", which === "skills");
+  $("tabBtnData").classList.toggle("active", which === "data");
   if (which === "workflows" && !WFLOWS_LOADED) { fillWfAgents(); loadWorkflows(); }
   if (which === "skills" && !SKILLS_LOADED) { loadSkills(); }
+  if (which === "data" && !AGENTS_LOADED) { loadAgents(); }
 }
 
 function fillWfAgents() {
@@ -663,10 +709,168 @@ async function init() {
     } catch(e) { $("t_result2").innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; }
   };
 
-  // --- workflows tab ---
+  // ------------------------------------------------------------- training data
+let AGENTS = [], AGENTS_LOADED = false;
+function setDStatus(msg, cls="") { const s=$("dstatus"); s.textContent=msg; s.className=cls; }
+
+async function loadAgents() {
+  try {
+    const r = await api("GET", "/studio/agents");
+    AGENTS = r.agents; AGENTS_LOADED = true;
+    renderAgents();
+  } catch(e) { setDStatus("failed to load agents: " + e.message, "bad"); }
+}
+
+function renderAgents() {
+  const el = $("agentList"); el.innerHTML = "";
+  AGENTS.forEach(a => {
+    const d = document.createElement("div");
+    d.className = "panel";
+    d.innerHTML =
+      `<h2>${esc(a.agent)} ${a.custom ? chip("custom", "when") : chip("built-in", "")}</h2>` +
+      `<div class="hint">${esc(a.choice_question)} — ${a.labels.length} labels, ` +
+      `${a.noul.length} noul flags, <b>${a.records}</b> training records</div>` +
+      `<div style="margin:8px 0">${a.labels.map(l => chip(esc(l), "")).join("")}</div>` +
+      `<div class="bar"><button data-act="build">🏋️ Build dataset</button>` +
+      (a.custom ? `<button data-act="edit" class="ghost">Edit</button>` : "") +
+      `<span class="hint">${a.custom ? "spec: agents/" + esc(a.agent) + ".json" : "spec lives in code (src/analyzer_questions.py)"}</span></div>`;
+    d.querySelector('[data-act="build"]').onclick = () => buildAgent(a.agent);
+    const eb = d.querySelector('[data-act="edit"]');
+    if (eb) eb.onclick = () => editAgent(a.agent);
+    el.appendChild(d);
+  });
+}
+
+function labelRow(name = "", crit = "", seeds = "") {
+  const d = document.createElement("div");
+  d.className = "step-row";
+  d.innerHTML =
+    `<div class="inline"><div><input placeholder="label name (e.g. request_refund)" data-f="name" value="${esc(name)}"></div>` +
+    `<div><input placeholder="what it means" data-f="crit" value="${esc(crit)}"></div>` +
+    `<div style="flex:0 0 auto"><button class="ghost small" type="button">✕</button></div></div>` +
+    `<label>Seed queries (one per line — 2+ per label is good)</label>` +
+    `<textarea data-f="seeds" rows="2" placeholder="I want a refund&#10;Give me my money back">${esc(seeds)}</textarea>`;
+  d.querySelector("button").onclick = () => d.remove();
+  return d;
+}
+
+function noulRow(name = "", instr = "", kws = "", impl = "") {
+  const d = document.createElement("div");
+  d.className = "step-row";
+  d.innerHTML =
+    `<div class="inline"><div><input placeholder="flag name (e.g. amount_mentioned)" data-f="name" value="${esc(name)}"></div>` +
+    `<div style="flex:0 0 auto"><button class="ghost small" type="button">✕</button></div></div>` +
+    `<label>Instructions</label><input placeholder="Does the query mention a specific amount?" data-f="instr" value="${esc(instr)}">` +
+    `<div class="inline"><div><label>Trigger keywords (comma-separated)</label>` +
+    `<input placeholder="$, dollar, usd" data-f="kws" value="${esc(kws)}"></div>` +
+    `<div><label>Implied by labels (comma-separated)</label>` +
+    `<input placeholder="request_refund" data-f="impl" value="${esc(impl)}"></div></div>`;
+  d.querySelector("button").onclick = () => d.remove();
+  return d;
+}
+
+function openAgentEditor(spec) {
+  $("agentEditorTitle").textContent = spec ? "Edit agent: " + spec.agent : "New agent";
+  $("a_id").value = spec ? spec.agent : "";
+  $("a_id").disabled = !!spec;
+  $("a_cq").value = spec ? spec.choice_question : "";
+  $("a_ci").value = spec ? spec.choice_instructions : "";
+  $("a_labels").innerHTML = ""; $("a_noul").innerHTML = "";
+  const labels = spec ? spec.labels : {};
+  const seeds = spec ? spec.seeds : {};
+  Object.entries(labels).forEach(([n, c]) =>
+    $("a_labels").appendChild(labelRow(n, c, (seeds[n] || []).join("\n"))));
+  if (!spec) $("a_labels").appendChild(labelRow());
+  (spec ? spec.noul : []).forEach(n =>
+    $("a_noul").appendChild(noulRow(n.name, n.instructions,
+      (n.keywords || []).join(", "), (n.implied_by || []).join(", "))));
+  $("agentEditor").style.display = "block";
+  $("agentEditor").scrollIntoView();
+}
+
+function closeAgentEditor() { $("agentEditor").style.display = "none"; }
+
+async function editAgent(agent) {
+  try { openAgentEditor(await api("GET", "/studio/agents/" + agent)); }
+  catch(e) { setDStatus(e.message, "bad"); }
+}
+
+function gatherAgentSpec() {
+  const labels = {}, seeds = {};
+  document.querySelectorAll("#a_labels .step-row").forEach(row => {
+    const g = f => row.querySelector(`[data-f="${f}"]`).value.trim();
+    if (g("name")) {
+      labels[g("name")] = g("crit");
+      seeds[g("name")] = g("seeds").split("\n").map(s => s.trim()).filter(Boolean);
+    }
+  });
+  const noul = [];
+  document.querySelectorAll("#a_noul .step-row").forEach(row => {
+    const g = f => row.querySelector(`[data-f="${f}"]`).value.trim();
+    if (g("name")) noul.push({
+      name: g("name"), instructions: g("instr"),
+      keywords: g("kws").split(",").map(s => s.trim()).filter(Boolean),
+      implied_by: g("impl").split(",").map(s => s.trim()).filter(Boolean),
+    });
+  });
+  return {
+    agent: $("a_id").value.trim(),
+    choice_question: $("a_cq").value.trim(),
+    choice_instructions: $("a_ci").value.trim(),
+    labels, noul, seeds,
+  };
+}
+
+async function saveAgent() {
+  try {
+    const r = await api("POST", "/studio/agents", gatherAgentSpec());
+    setDStatus("saved " + r.agent + " — restart the service to serve/train with it.");
+    closeAgentEditor(); AGENTS_LOADED = false; await loadAgents();
+  } catch(e) { setDStatus(e.message, "bad"); }
+}
+
+async function buildAgent(agent) {
+  setDStatus("building dataset for " + agent + " …");
+  $("buildPanel").style.display = "none";
+  try {
+    const r = await api("POST", "/studio/agents/" + agent + "/build?repeat=6");
+    renderBuild(r);
+    setDStatus(`built ${r.records} records → train/data/${agent}.jsonl`);
+    AGENTS_LOADED = false; await loadAgents();
+  } catch(e) { setDStatus(e.message, "bad"); }
+}
+
+function renderBuild(r) {
+  const bal = Object.entries(r.choice_balance)
+    .map(([k, v]) => chip(`${esc(k)}: ${v}`, "")).join("");
+  const np = Object.entries(r.noul_positives)
+    .map(([k, v]) => chip(`${esc(k)}: ${v}`, "when")).join("");
+  const rows = r.samples.map(s => {
+    const cells = Object.entries(s).map(([k, v]) =>
+      `<td><div class="hint">${esc(k)}</div>${esc(v)}</td>`).join("");
+    return `<tr>${cells}</tr>`;
+  }).join("");
+  $("buildResult").innerHTML =
+    `<div class="verdict"><b>${r.records} records</b> for agent <b>${esc(r.agent)}</b></div>` +
+    `<div style="margin:10px 0"><div class="hint">choice balance</div>${bal}</div>` +
+    `<div style="margin:10px 0"><div class="hint">noul positives</div>${np || "<span class='hint'>none</span>"}</div>` +
+    `<div class="hint">sample records</div>` +
+    `<div style="overflow:auto"><table class="samp"><tr></tr>${rows}</table></div>`;
+  $("buildPanel").style.display = "block";
+  $("buildPanel").scrollIntoView();
+}
+
+// --- workflows tab ---
   $("tabBtnTree").onclick = () => showTab("tree");
   $("tabBtnWf").onclick = () => showTab("workflows");
   $("tabBtnSkills").onclick = () => showTab("skills");
+  $("tabBtnData").onclick = () => showTab("data");
+  $("addAgent").onclick = () => openAgentEditor(null);
+  $("a_add_label").onclick = () => $("a_labels").appendChild(labelRow());
+  $("a_add_noul").onclick = () => $("a_noul").appendChild(noulRow());
+  $("a_save").onclick = saveAgent;
+  $("a_cancel").onclick = closeAgentEditor;
+  $("reloadAgents").onclick = async () => { AGENTS_LOADED = false; await loadAgents(); };
   $("addWf").onclick = () => openWEditor(-1);
   $("w_save").onclick = saveWEditor;
   $("w_cancel").onclick = closeWEditor;
